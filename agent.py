@@ -214,11 +214,23 @@ def _sanitize_for_tts(text: str) -> str:
     return text
 
 
+def _has_speakable_content(text: str) -> bool:
+    """True iff ``text`` contains at least one alphanumeric character.
+
+    Pure-whitespace or pure-punctuation chunks confuse Soniox TTS: it opens
+    a stream, gets nothing meaningful to synthesize, and emits garbled
+    audio. We drop these chunks entirely.
+    """
+    return any(ch.isalnum() for ch in text)
+
+
 async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
     """Async generator wrapper — sanitize each chunk before TTS sees it.
 
-    Buffers across chunks so a markdown link / bracket tag split between two
-    LLM stream chunks (e.g. ``[`` … ``](url)``) is still cleaned correctly.
+    - Buffers across chunks so a markdown link / bracket tag split between
+      two LLM stream chunks (e.g. ``[`` … ``](url)``) is still cleaned.
+    - Drops chunks with no alphanumeric content (whitespace-only, pure
+      punctuation) so Soniox never opens a TTS stream for them.
     """
     buf = ""
     async for chunk in stream:
@@ -227,16 +239,22 @@ async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
         buf += chunk
         last_open = max(buf.rfind("["), buf.rfind("**"), buf.rfind("`"))
         if last_open == -1:
-            yield _sanitize_for_tts(buf)
+            cleaned = _sanitize_for_tts(buf)
+            if _has_speakable_content(cleaned):
+                yield cleaned
             buf = ""
         else:
             safe = buf[:last_open]
             tail = buf[last_open:]
             if safe:
-                yield _sanitize_for_tts(safe)
+                cleaned = _sanitize_for_tts(safe)
+                if _has_speakable_content(cleaned):
+                    yield cleaned
             buf = tail
     if buf:
-        yield _sanitize_for_tts(buf)
+        cleaned = _sanitize_for_tts(buf)
+        if _has_speakable_content(cleaned):
+            yield cleaned
 
 
 class InfoAgent(Agent):
@@ -382,7 +400,13 @@ async def entrypoint(ctx: JobContext) -> None:
         turn_handling=TurnHandlingOptions(
             turn_detection="stt",
             interruption={"resume_false_interruption": True},
-            preemptive_generation={"enabled": True},
+            # Preemptive generation DISABLED on the Soniox variant.
+            # Reason: Soniox TTS plays the LLM's filler tokens (whitespace,
+            # tiny pre-tool-call fragments) as garbled audio because each
+            # micro-utterance opens its own WebSocket stream. Symptom:
+            # "random speech" right before function calls. Waiting for the
+            # full turn before TTS removes the fragments entirely.
+            preemptive_generation={"enabled": False},
         ),
         max_tool_steps=3,
         user_away_timeout=30,

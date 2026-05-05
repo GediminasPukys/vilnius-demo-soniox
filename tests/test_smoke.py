@@ -62,6 +62,18 @@ def test_tts_sanitizer_strips_markdown_and_brackets():
     assert _sanitize_for_tts("Sveiki, padėsiu dėl deklaravimo.") == "Sveiki, padėsiu dėl deklaravimo."
 
 
+def test_speakable_filter_drops_empty_chunks():
+    """Pure-whitespace / punctuation-only chunks must NOT reach Soniox TTS."""
+    from agent import _has_speakable_content
+
+    assert _has_speakable_content("Labas")
+    assert _has_speakable_content("123")
+    assert not _has_speakable_content("")
+    assert not _has_speakable_content("   ")
+    assert not _has_speakable_content("...")
+    assert not _has_speakable_content(",.; —")
+
+
 def test_kb_lookups_work():
     from knowledge.faqs import get_faq, faq_index
     from knowledge.kb import DEADLINES, REQUIRED_DOCS, CONTACTS, SENIUNIJOS_INFO
