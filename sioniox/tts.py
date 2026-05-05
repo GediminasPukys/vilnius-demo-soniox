@@ -27,7 +27,7 @@ logger = logging.getLogger("sioniox.tts")
 REST_URL = "https://tts-rt.soniox.com/tts"
 WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
 
-DEFAULT_MODEL = "tts-rt-v1-preview"
+DEFAULT_MODEL = "tts-rt-v1"
 DEFAULT_VOICE = "Adrian"
 DEFAULT_LANGUAGE = "en"
 DEFAULT_SAMPLE_RATE = 24000
@@ -221,14 +221,19 @@ class SynthesizeStream(tts.SynthesizeStream):
 
             send_task = asyncio.create_task(self._send_text_task(ws, stream_id), name="sioniox_tts_send")
             recv_task = asyncio.create_task(self._recv_audio_task(ws, output_emitter, stream_id), name="sioniox_tts_recv")
+            keepalive_task = asyncio.create_task(self._keepalive_task(ws), name="sioniox_tts_keepalive")
 
             try:
+                # Wait for send + recv to finish; keepalive is cancelled when they do.
                 await asyncio.gather(send_task, recv_task)
             except Exception:
-                for t in (send_task, recv_task):
+                for t in (send_task, recv_task, keepalive_task):
                     if not t.done():
                         t.cancel()
                 raise
+            finally:
+                if not keepalive_task.done():
+                    keepalive_task.cancel()
 
         except asyncio.TimeoutError as e:
             raise APITimeoutError() from e
@@ -237,6 +242,29 @@ class SynthesizeStream(tts.SynthesizeStream):
         finally:
             if ws is not None and not ws.closed:
                 await ws.close()
+
+    async def _keepalive_task(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+    ) -> None:
+        """Send ``{"keep_alive": true}`` every 20 s.
+
+        Soniox closes idle WebSocket connections after 20–30 s. Without this,
+        a quiet user-pause mid-call can cause the next utterance to be
+        rendered on a half-closed socket — which manifests as garbled or
+        truncated audio. Mirrors Pipecat's keepalive cadence.
+        """
+        try:
+            while not ws.closed:
+                await asyncio.sleep(20)
+                if ws.closed:
+                    return
+                try:
+                    await ws.send_str(json.dumps({"keep_alive": True}))
+                except (aiohttp.ClientError, ConnectionResetError):
+                    return
+        except asyncio.CancelledError:
+            return
 
     async def _send_text_task(
         self,

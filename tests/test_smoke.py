@@ -38,6 +38,30 @@ def test_function_tools_have_resolvable_type_hints():
     assert not failures, f"Tool type hints failed: {failures}"
 
 
+def test_tts_sanitizer_strips_markdown_and_brackets():
+    """The Soniox TTS sanitizer must strip markdown links, bracket tags,
+    bold/italic, and replace bare URLs with TTS-friendly spelling."""
+    from agent import _sanitize_for_tts
+
+    raw = "Apsilankykite [www.epaslaugos.lt](http://www.epaslaugos.lt) puslapyje."
+    out = _sanitize_for_tts(raw)
+    assert "[" not in out and "]" not in out and "(" not in out
+    assert "epaslaugos taškas l t" in out
+
+    # Bracket audio tags — stripped, surrounding text preserved.
+    assert _sanitize_for_tts("[warmly] Sveiki, [thoughtfully] klausau.") == "Sveiki, klausau."
+
+    # Markdown emphasis — markers stripped, text kept.
+    assert _sanitize_for_tts("Tai **labai svarbu** ir *būtina*.") == "Tai labai svarbu ir būtina."
+
+    # Bare URL — spelled out.
+    out = _sanitize_for_tts("Užpildyti formą galite www.epaslaugos.lt portale.")
+    assert "www" not in out and "epaslaugos taškas l t" in out
+
+    # Plain text — unchanged.
+    assert _sanitize_for_tts("Sveiki, padėsiu dėl deklaravimo.") == "Sveiki, padėsiu dėl deklaravimo."
+
+
 def test_kb_lookups_work():
     from knowledge.faqs import get_faq, faq_index
     from knowledge.kb import DEADLINES, REQUIRED_DOCS, CONTACTS, SENIUNIJOS_INFO

@@ -5,7 +5,7 @@ Vienas failas: AgentSession setup, sistemos prompt'as, balso įrankiai
 
 - STT: Soniox ``stt-rt-v4`` (lt strict).
 - LLM: ``openai/gpt-5.3-chat-latest`` per LiveKit Inference.
-- TTS: Soniox ``tts-rt-v1-preview`` per lokalų ``sioniox/`` paketą
+- TTS: Soniox ``tts-rt-v1`` per lokalų ``sioniox/`` paketą
   (žr. soniox_livekit_agent projektą — tas pats plugin'as).
 - Turn detection: Soniox STT endpointing (``turn_detection="stt"``).
   JOKIO turn-detector modelio.
@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
-from typing import Optional
+from typing import AsyncIterable, Optional
 
 from dotenv import load_dotenv
 
@@ -29,7 +30,7 @@ from livekit.agents import (
     inference,
 )
 from livekit.agents.llm import function_tool
-from livekit.agents.voice import RunContext
+from livekit.agents.voice import ModelSettings, RunContext
 from livekit.plugins import silero, soniox
 
 import sioniox
@@ -158,12 +159,108 @@ GREETING = (
 # Agent
 # ---------------------------------------------------------------------------
 
+# Text-cleanup pipeline for Soniox TTS — strips markdown and characters that
+# trip the model into "random speech" output. Soniox doesn't interpret
+# any in-band markup; everything visible-but-unspoken gets removed.
+#
+# Order matters: do the link replacement BEFORE we strip square brackets,
+# because [text](url) needs the brackets to be matched.
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")          # [text](url) → text
+_BRACKET_TAG_RE = re.compile(r"\[[^\]]{0,40}\]")            # leftover [warmly] / [tag]
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")                  # **bold** → bold
+_ITALIC_RE = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)")       # *em* → em
+_BACKTICKS_RE = re.compile(r"`+([^`]*)`+")                 # `code` → code
+# Bare URL → spoken-friendly fallback (drop scheme, replace dots with " taškas ").
+_URL_RE = re.compile(r"\b(?:https?://)?(?:www\.)?([\w\-.]+\.(?:lt|com|org|eu|net))\b", re.IGNORECASE)
+
+
+def _spell_url(match: re.Match) -> str:
+    """Render `epaslaugos.lt` as `e paslaugos taškas l t` (TTS-friendly)."""
+    host = match.group(1)
+    parts = host.split(".")
+    spoken_parts: list[str] = []
+    for part in parts:
+        # Two-letter TLDs read letter-by-letter; longer parts read as-is.
+        if len(part) <= 2:
+            spoken_parts.append(" ".join(part))
+        else:
+            spoken_parts.append(part)
+    return " taškas ".join(spoken_parts)
+
+
+def _sanitize_for_tts(text: str) -> str:
+    """Make agent text safe for Soniox TTS.
+
+    - Strip markdown links / bold / italic / backticks.
+    - Strip ``[warmly]``-style bracket tags (Soniox doesn't parse them).
+    - Replace symbols Soniox mispronounces ("/", "—", brackets, "+").
+    - Spell bare URLs in Lithuanian-friendly form.
+    """
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _BOLD_RE.sub(r"\1", text)
+    text = _ITALIC_RE.sub(r"\1", text)
+    text = _BACKTICKS_RE.sub(r"\1", text)
+    text = _URL_RE.sub(_spell_url, text)
+    text = _BRACKET_TAG_RE.sub("", text)
+    # Symbol → word substitutions that Lithuanian Soniox handles poorly.
+    text = text.replace("/", " arba ")
+    text = text.replace("—", ",")
+    text = text.replace("–", ",")
+    text = text.replace("(", ", ").replace(")", ",")
+    text = text.replace("+", " plius ")
+    text = text.replace("&", " ir ")
+    # Collapse whitespace caused by replacements.
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
+    """Async generator wrapper — sanitize each chunk before TTS sees it.
+
+    Buffers across chunks so a markdown link / bracket tag split between two
+    LLM stream chunks (e.g. ``[`` … ``](url)``) is still cleaned correctly.
+    """
+    buf = ""
+    async for chunk in stream:
+        if not chunk:
+            continue
+        buf += chunk
+        last_open = max(buf.rfind("["), buf.rfind("**"), buf.rfind("`"))
+        if last_open == -1:
+            yield _sanitize_for_tts(buf)
+            buf = ""
+        else:
+            safe = buf[:last_open]
+            tail = buf[last_open:]
+            if safe:
+                yield _sanitize_for_tts(safe)
+            buf = tail
+    if buf:
+        yield _sanitize_for_tts(buf)
+
+
 class InfoAgent(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=INSTRUCTIONS)
 
     async def on_enter(self) -> None:
         await self.session.say(GREETING, allow_interruptions=False)
+
+    async def tts_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings: ModelSettings,
+    ):
+        """Sanitize LLM output before it reaches Soniox TTS.
+
+        The LLM may occasionally slip in markdown links (``[text](url)``),
+        emphasis (``**bold**``), or audio-tag-style brackets (``[warmly]``)
+        despite the prompt forbidding them. Soniox TTS reads those literal
+        characters as syllables, producing "random speech". This node
+        strips them and converts bare URLs to a TTS-friendly spelling
+        (``epaslaugos.lt`` → ``e paslaugos taškas l t``).
+        """
+        return Agent.default.tts_node(self, _sanitize_stream(text), model_settings)
 
     @function_tool
     async def lookup_faq(self, context: RunCtx, faq_id: str) -> str:
