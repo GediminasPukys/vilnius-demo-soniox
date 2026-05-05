@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Test data — kept structure (test-runs/) but not its contents
+# (handled by test-runs/.gitignore)
+
+# Local SQLite DB (regenerate with `python -m data.seed_db`)
+data/customers.db
+
+# LiveKit deployment secrets (use secrets.env.example as a template)
+secrets.env
