@@ -436,6 +436,10 @@ async def entrypoint(ctx: JobContext) -> None:
         user_away_timeout=30,
     )
 
+    logger.info(
+        "[BOOT] Soniox variant — text_input=True, audio_input=BVC, "
+        "TTS=soniox tts-rt-v1 voice=Adrian language=lt"
+    )
     await session.start(
         agent=InfoAgent(),
         room=ctx.room,
@@ -452,6 +456,7 @@ async def entrypoint(ctx: JobContext) -> None:
             delete_room_on_close=False,
         ),
     )
+    logger.info("[BOOT] session.start returned — agent ready")
 
 
 if __name__ == "__main__":

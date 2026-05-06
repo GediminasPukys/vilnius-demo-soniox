@@ -317,28 +317,84 @@ class SynthesizeStream(tts.SynthesizeStream):
         output_emitter: tts.AudioEmitter,
         stream_id: str,
     ) -> None:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                if data.get("stream_id") != stream_id:
-                    continue
-                if "error_code" in data:
-                    raise APIStatusError(
-                        data.get("error_message", "Soniox TTS error"),
-                        status_code=data.get("error_code", 500),
-                        request_id=stream_id,
-                        body=msg.data,
+        msgs_total = 0
+        audio_chunks_total = 0
+        audio_bytes_total = 0
+        try:
+            async for msg in ws:
+                msgs_total += 1
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                    except Exception as e:
+                        logger.warning(f"[Soniox→TTS] non-JSON text frame stream_id={stream_id}: {msg.data!r} err={e!r}")
+                        continue
+
+                    msg_stream_id = data.get("stream_id")
+                    if msg_stream_id != stream_id:
+                        logger.debug(
+                            f"[Soniox→TTS] msg for other stream_id={msg_stream_id} (mine={stream_id}); ignoring"
+                        )
+                        continue
+
+                    if "error_code" in data:
+                        logger.error(
+                            f"[Soniox→TTS] ERROR stream_id={stream_id} "
+                            f"code={data.get('error_code')} msg={data.get('error_message')!r} "
+                            f"raw={msg.data!r}"
+                        )
+                        raise APIStatusError(
+                            data.get("error_message", "Soniox TTS error"),
+                            status_code=data.get("error_code", 500),
+                            request_id=stream_id,
+                            body=msg.data,
+                        )
+
+                    audio_b64 = data.get("audio")
+                    if audio_b64:
+                        audio_bytes = base64.b64decode(audio_b64)
+                        audio_chunks_total += 1
+                        audio_bytes_total += len(audio_bytes)
+                        if audio_chunks_total <= 3 or audio_chunks_total % 20 == 0:
+                            logger.info(
+                                f"[Soniox→TTS] audio chunk #{audio_chunks_total} "
+                                f"stream_id={stream_id} size={len(audio_bytes)}B "
+                                f"total={audio_bytes_total}B"
+                            )
+                        output_emitter.push(audio_bytes)
+
+                    if data.get("terminated"):
+                        logger.info(
+                            f"[Soniox→TTS] TERMINATED stream_id={stream_id} "
+                            f"msgs={msgs_total} audio_chunks={audio_chunks_total} "
+                            f"audio_bytes={audio_bytes_total}"
+                        )
+                        output_emitter.end_segment()
+                        return
+                    if data.get("audio_end"):
+                        logger.info(
+                            f"[Soniox→TTS] audio_end stream_id={stream_id} "
+                            f"audio_chunks={audio_chunks_total} bytes={audio_bytes_total}"
+                        )
+                        # final audio for this segment delivered; wait for terminated
+                        continue
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    audio_chunks_total += 1
+                    audio_bytes_total += len(msg.data)
+                    logger.debug(
+                        f"[Soniox→TTS] binary frame #{audio_chunks_total} "
+                        f"size={len(msg.data)}B"
                     )
-                if "audio" in data and data["audio"]:
-                    audio_bytes = base64.b64decode(data["audio"])
-                    output_emitter.push(audio_bytes)
-                if data.get("terminated"):
-                    output_emitter.end_segment()
+                    output_emitter.push(msg.data)
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    logger.warning(
+                        f"[Soniox→TTS] ws {msg.type.name} stream_id={stream_id} "
+                        f"msgs={msgs_total} audio_chunks={audio_chunks_total}"
+                    )
                     return
-                if data.get("audio_end"):
-                    # final audio for this segment delivered; wait for terminated
-                    continue
-            elif msg.type == aiohttp.WSMsgType.BINARY:
-                output_emitter.push(msg.data)
-            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                return
+        finally:
+            logger.info(
+                f"[Soniox→TTS] recv loop done stream_id={stream_id} "
+                f"msgs={msgs_total} audio_chunks={audio_chunks_total} "
+                f"audio_bytes={audio_bytes_total}"
+            )
