@@ -273,17 +273,44 @@ class SynthesizeStream(tts.SynthesizeStream):
     ) -> None:
         chunks_sent = 0
         accumulated = ""
+
+        async def _close_segment() -> None:
+            """End the current segment.
+
+            * If we sent ≥ 1 real text chunk → ``text_end:true`` so Soniox
+              flushes the synthesized audio cleanly.
+            * If we sent ZERO real chunks (e.g. the LLM produced an empty
+              turn around a tool call) → ``cancel`` so Soniox aborts
+              instead of hallucinating ~2 s of audio from an empty prompt.
+              This is the root cause of the "random speech right when a
+              function call fires" symptom.
+            """
+            try:
+                if chunks_sent == 0:
+                    logger.info(
+                        f"[TTS→Soniox] no text — cancelling stream_id={stream_id} "
+                        "(prevents Soniox from synthesizing phantom audio)"
+                    )
+                    await ws.send_str(json.dumps({
+                        "stream_id": stream_id,
+                        "cancel": True,
+                    }))
+                else:
+                    await ws.send_str(json.dumps({
+                        "stream_id": stream_id,
+                        "text": "",
+                        "text_end": True,
+                    }))
+            except (aiohttp.ClientError, ConnectionResetError) as e:
+                logger.warning(f"[TTS→Soniox] failed to close segment: {e!r}")
+
         async for data in self._input_ch:
             if isinstance(data, self._FlushSentinel):
                 logger.info(
                     f"[TTS→Soniox] flush stream_id={stream_id} "
                     f"chunks_sent={chunks_sent} total_text={accumulated!r}"
                 )
-                await ws.send_str(json.dumps({
-                    "stream_id": stream_id,
-                    "text": "",
-                    "text_end": True,
-                }))
+                await _close_segment()
                 return
             if not data:
                 continue
@@ -300,16 +327,12 @@ class SynthesizeStream(tts.SynthesizeStream):
                 "text_end": False,
             }))
 
-        # Channel closed without flush
+        # Channel closed without an explicit flush sentinel.
         logger.info(
             f"[TTS→Soniox] close stream_id={stream_id} "
             f"chunks_sent={chunks_sent} total_text={accumulated!r}"
         )
-        await ws.send_str(json.dumps({
-            "stream_id": stream_id,
-            "text": "",
-            "text_end": True,
-        }))
+        await _close_segment()
 
     async def _recv_audio_task(
         self,
