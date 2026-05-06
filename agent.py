@@ -32,8 +32,8 @@ from livekit.agents import (
     inference,
 )
 from livekit.agents.llm import function_tool
-from livekit.agents.voice import ModelSettings, RunContext
-from livekit.plugins import silero, soniox
+from livekit.agents.voice import ModelSettings, RunContext, room_io
+from livekit.plugins import noise_cancellation, silero, soniox
 
 import soniox_tts
 
@@ -436,7 +436,22 @@ async def entrypoint(ctx: JobContext) -> None:
         user_away_timeout=30,
     )
 
-    await session.start(agent=InfoAgent(), room=ctx.room)
+    await session.start(
+        agent=InfoAgent(),
+        room=ctx.room,
+        room_options=room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=noise_cancellation.BVC(),
+            ),
+            # Required so the LiveKit Agents Console can deliver typed
+            # AND transcribed-voice messages on the ``lk.agent.request``
+            # text stream. Without this, every user turn is dropped with
+            # the log line "ignoring text stream with topic
+            # 'lk.agent.request', no callback attached".
+            text_input=True,
+            delete_room_on_close=False,
+        ),
+    )
 
 
 if __name__ == "__main__":
