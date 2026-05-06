@@ -5,8 +5,10 @@ Vienas failas: AgentSession setup, sistemos prompt'as, balso įrankiai
 
 - STT: Soniox ``stt-rt-v4`` (lt strict).
 - LLM: ``openai/gpt-5.3-chat-latest`` per LiveKit Inference.
-- TTS: Soniox ``tts-rt-v1`` per lokalų ``sioniox/`` paketą
-  (žr. soniox_livekit_agent projektą — tas pats plugin'as).
+- TTS: Soniox ``tts-rt-v1`` per lokalų ``soniox_tts/`` paketą
+  (žr. soniox_livekit_agent projektą — tas pats plugin'as,
+  tik pavadintas ``soniox_tts``, kad nesusidurtų su
+  ``livekit.plugins.soniox`` STT plugin'u).
 - Turn detection: Soniox STT endpointing (``turn_detection="stt"``).
   JOKIO turn-detector modelio.
 """
@@ -33,7 +35,7 @@ from livekit.agents.llm import function_tool
 from livekit.agents.voice import ModelSettings, RunContext
 from livekit.plugins import silero, soniox
 
-import sioniox
+import soniox_tts
 
 from knowledge.faqs import FAQS, faq_index, get_faq
 from knowledge.kb import (
@@ -227,21 +229,31 @@ def _has_speakable_content(text: str) -> bool:
 async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
     """Async generator wrapper — sanitize each chunk before TTS sees it.
 
+    - Logs every raw LLM chunk and every cleaned chunk yielded to TTS,
+      so we can see exactly what reaches Soniox.
     - Buffers across chunks so a markdown link / bracket tag split between
       two LLM stream chunks (e.g. ``[`` … ``](url)``) is still cleaned.
     - Drops chunks with no alphanumeric content (whitespace-only, pure
       punctuation) so Soniox never opens a TTS stream for them.
     """
     buf = ""
+    raw_total = ""
+    yielded_total = ""
     async for chunk in stream:
         if not chunk:
             continue
+        raw_total += chunk
+        logger.info(f"[LLM→TTS] raw chunk: {chunk!r}")
         buf += chunk
         last_open = max(buf.rfind("["), buf.rfind("**"), buf.rfind("`"))
         if last_open == -1:
             cleaned = _sanitize_for_tts(buf)
             if _has_speakable_content(cleaned):
+                logger.info(f"[LLM→TTS] yield clean: {cleaned!r}")
+                yielded_total += cleaned
                 yield cleaned
+            elif cleaned:
+                logger.info(f"[LLM→TTS] drop empty/punct-only: {cleaned!r}")
             buf = ""
         else:
             safe = buf[:last_open]
@@ -249,12 +261,24 @@ async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
             if safe:
                 cleaned = _sanitize_for_tts(safe)
                 if _has_speakable_content(cleaned):
+                    logger.info(f"[LLM→TTS] yield clean (held tail): {cleaned!r}")
+                    yielded_total += cleaned
                     yield cleaned
+                elif cleaned:
+                    logger.info(f"[LLM→TTS] drop empty/punct-only: {cleaned!r}")
             buf = tail
     if buf:
         cleaned = _sanitize_for_tts(buf)
         if _has_speakable_content(cleaned):
+            logger.info(f"[LLM→TTS] yield clean (final): {cleaned!r}")
+            yielded_total += cleaned
             yield cleaned
+        elif cleaned:
+            logger.info(f"[LLM→TTS] drop empty/punct-only (final): {cleaned!r}")
+    logger.info(
+        f"[LLM→TTS] turn complete — raw_total={raw_total!r} "
+        f"yielded_total={yielded_total!r}"
+    )
 
 
 class InfoAgent(Agent):
@@ -390,10 +414,10 @@ async def entrypoint(ctx: JobContext) -> None:
             ),
         ),
         llm=inference.LLM(model="openai/gpt-5.3-chat-latest"),
-        # Soniox TTS — local sioniox/ package (custom plugin, ported from
-        # the soniox_livekit_agent reference project). Lithuanian voice
-        # "Adrian" via Soniox's tts-rt-v1-preview model.
-        tts=sioniox.TTS(
+        # Soniox TTS — local soniox_tts/ package (custom plugin, ported
+        # from the soniox_livekit_agent reference project). Lithuanian
+        # voice "Adrian" via Soniox's tts-rt-v1 model.
+        tts=soniox_tts.TTS(
             language="lt",
             voice="Adrian",
         ),

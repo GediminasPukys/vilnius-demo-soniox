@@ -22,7 +22,7 @@ from livekit.agents import (
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, NotGivenOr
 from livekit.agents.utils import is_given
 
-logger = logging.getLogger("sioniox.tts")
+logger = logging.getLogger("soniox.tts")
 
 REST_URL = "https://tts-rt.soniox.com/tts"
 WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
@@ -219,9 +219,9 @@ class SynthesizeStream(tts.SynthesizeStream):
             }
             await ws.send_str(json.dumps(config))
 
-            send_task = asyncio.create_task(self._send_text_task(ws, stream_id), name="sioniox_tts_send")
-            recv_task = asyncio.create_task(self._recv_audio_task(ws, output_emitter, stream_id), name="sioniox_tts_recv")
-            keepalive_task = asyncio.create_task(self._keepalive_task(ws), name="sioniox_tts_keepalive")
+            send_task = asyncio.create_task(self._send_text_task(ws, stream_id), name="soniox_tts_send")
+            recv_task = asyncio.create_task(self._recv_audio_task(ws, output_emitter, stream_id), name="soniox_tts_recv")
+            keepalive_task = asyncio.create_task(self._keepalive_task(ws), name="soniox_tts_keepalive")
 
             try:
                 # Wait for send + recv to finish; keepalive is cancelled when they do.
@@ -271,9 +271,14 @@ class SynthesizeStream(tts.SynthesizeStream):
         ws: aiohttp.ClientWebSocketResponse,
         stream_id: str,
     ) -> None:
+        chunks_sent = 0
+        accumulated = ""
         async for data in self._input_ch:
             if isinstance(data, self._FlushSentinel):
-                # Signal end of text for this segment
+                logger.info(
+                    f"[TTS→Soniox] flush stream_id={stream_id} "
+                    f"chunks_sent={chunks_sent} total_text={accumulated!r}"
+                )
                 await ws.send_str(json.dumps({
                     "stream_id": stream_id,
                     "text": "",
@@ -283,6 +288,12 @@ class SynthesizeStream(tts.SynthesizeStream):
             if not data:
                 continue
             self._mark_started()
+            chunks_sent += 1
+            accumulated += data
+            logger.info(
+                f"[TTS→Soniox] chunk #{chunks_sent} stream_id={stream_id} "
+                f"text={data!r}"
+            )
             await ws.send_str(json.dumps({
                 "stream_id": stream_id,
                 "text": data,
@@ -290,6 +301,10 @@ class SynthesizeStream(tts.SynthesizeStream):
             }))
 
         # Channel closed without flush
+        logger.info(
+            f"[TTS→Soniox] close stream_id={stream_id} "
+            f"chunks_sent={chunks_sent} total_text={accumulated!r}"
+        )
         await ws.send_str(json.dumps({
             "stream_id": stream_id,
             "text": "",
