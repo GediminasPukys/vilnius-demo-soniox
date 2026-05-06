@@ -191,12 +191,22 @@ def _spell_url(match: re.Match) -> str:
 
 
 def _sanitize_for_tts(text: str) -> str:
-    """Make agent text safe for Soniox TTS.
+    """Make agent text safe for Soniox TTS without destroying prosody.
 
+    CRITICAL: do NOT strip leading/trailing whitespace and do NOT drop
+    punctuation. Soniox TTS uses commas, periods, and question marks to
+    drive natural prosody (pauses, sentence boundaries, rising
+    intonation). Leading spaces between LLM chunks are what keep words
+    from running together. Removing either makes Soniox sound robotic
+    and concatenated, which was the difference between our pipeline and
+    the Soniox playground.
+
+    What this function still does:
     - Strip markdown links / bold / italic / backticks.
     - Strip ``[warmly]``-style bracket tags (Soniox doesn't parse them).
-    - Replace symbols Soniox mispronounces ("/", "—", brackets, "+").
     - Spell bare URLs in Lithuanian-friendly form.
+    - Replace a few characters Soniox mispronounces with prose
+      equivalents that DO carry prosody.
     """
     text = _MD_LINK_RE.sub(r"\1", text)
     text = _BOLD_RE.sub(r"\1", text)
@@ -204,37 +214,28 @@ def _sanitize_for_tts(text: str) -> str:
     text = _BACKTICKS_RE.sub(r"\1", text)
     text = _URL_RE.sub(_spell_url, text)
     text = _BRACKET_TAG_RE.sub("", text)
-    # Symbol → word substitutions that Lithuanian Soniox handles poorly.
+    # Symbol → prose substitutions. We keep commas / periods / question
+    # marks as-is so prosody survives.
     text = text.replace("/", " arba ")
-    text = text.replace("—", ",")
-    text = text.replace("–", ",")
-    text = text.replace("(", ", ").replace(")", ",")
+    text = text.replace("—", ", ")
+    text = text.replace("–", ", ")
+    text = text.replace("(", ", ").replace(")", ", ")
     text = text.replace("+", " plius ")
     text = text.replace("&", " ir ")
-    # Collapse whitespace caused by replacements.
-    text = re.sub(r"\s+", " ", text).strip()
+    # NOTE: no .strip() here — leading spaces are intentional.
     return text
-
-
-def _has_speakable_content(text: str) -> bool:
-    """True iff ``text`` contains at least one alphanumeric character.
-
-    Pure-whitespace or pure-punctuation chunks confuse Soniox TTS: it opens
-    a stream, gets nothing meaningful to synthesize, and emits garbled
-    audio. We drop these chunks entirely.
-    """
-    return any(ch.isalnum() for ch in text)
 
 
 async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
     """Async generator wrapper — sanitize each chunk before TTS sees it.
 
-    - Logs every raw LLM chunk and every cleaned chunk yielded to TTS,
-      so we can see exactly what reaches Soniox.
-    - Buffers across chunks so a markdown link / bracket tag split between
-      two LLM stream chunks (e.g. ``[`` … ``](url)``) is still cleaned.
-    - Drops chunks with no alphanumeric content (whitespace-only, pure
-      punctuation) so Soniox never opens a TTS stream for them.
+    Pass-through philosophy: keep ALL printable content the LLM emits
+    (including punctuation chunks like ``,`` ``.`` ``?`` and leading
+    spaces in `` jei`` `` išvykstate``) so Soniox renders natural
+    prosody. The only chunks dropped are completely empty strings.
+    Empty-turn handling (no text at all) is taken care of inside the
+    Soniox plugin's ``_send_text_task`` — it sends ``cancel`` instead
+    of ``text_end`` so Soniox doesn't hallucinate audio.
     """
     buf = ""
     raw_total = ""
@@ -248,33 +249,27 @@ async def _sanitize_stream(stream: AsyncIterable[str]) -> AsyncIterable[str]:
         last_open = max(buf.rfind("["), buf.rfind("**"), buf.rfind("`"))
         if last_open == -1:
             cleaned = _sanitize_for_tts(buf)
-            if _has_speakable_content(cleaned):
-                logger.info(f"[LLM→TTS] yield clean: {cleaned!r}")
+            if cleaned:
+                logger.info(f"[LLM→TTS] yield: {cleaned!r}")
                 yielded_total += cleaned
                 yield cleaned
-            elif cleaned:
-                logger.info(f"[LLM→TTS] drop empty/punct-only: {cleaned!r}")
             buf = ""
         else:
             safe = buf[:last_open]
             tail = buf[last_open:]
             if safe:
                 cleaned = _sanitize_for_tts(safe)
-                if _has_speakable_content(cleaned):
-                    logger.info(f"[LLM→TTS] yield clean (held tail): {cleaned!r}")
+                if cleaned:
+                    logger.info(f"[LLM→TTS] yield (held tail): {cleaned!r}")
                     yielded_total += cleaned
                     yield cleaned
-                elif cleaned:
-                    logger.info(f"[LLM→TTS] drop empty/punct-only: {cleaned!r}")
             buf = tail
     if buf:
         cleaned = _sanitize_for_tts(buf)
-        if _has_speakable_content(cleaned):
-            logger.info(f"[LLM→TTS] yield clean (final): {cleaned!r}")
+        if cleaned:
+            logger.info(f"[LLM→TTS] yield (final): {cleaned!r}")
             yielded_total += cleaned
             yield cleaned
-        elif cleaned:
-            logger.info(f"[LLM→TTS] drop empty/punct-only (final): {cleaned!r}")
     logger.info(
         f"[LLM→TTS] turn complete — raw_total={raw_total!r} "
         f"yielded_total={yielded_total!r}"
@@ -416,10 +411,10 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=inference.LLM(model="openai/gpt-5.3-chat-latest"),
         # Soniox TTS — local soniox_tts/ package (custom plugin, ported
         # from the soniox_livekit_agent reference project). Lithuanian
-        # voice "Adrian" via Soniox's tts-rt-v1 model.
+        # voice "Maya" via Soniox's tts-rt-v1 model.
         tts=soniox_tts.TTS(
             language="lt",
-            voice="Adrian",
+            voice="Maya",
         ),
         turn_handling=TurnHandlingOptions(
             turn_detection="stt",
@@ -438,7 +433,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     logger.info(
         "[BOOT] Soniox variant — text_input=True, audio_input=BVC, "
-        "TTS=soniox tts-rt-v1 voice=Adrian language=lt"
+        "TTS=soniox tts-rt-v1 voice=Maya language=lt (WebSocket: "
+        "wss://tts-rt.soniox.com/tts-websocket)"
     )
     await session.start(
         agent=InfoAgent(),

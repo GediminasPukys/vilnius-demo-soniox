@@ -49,7 +49,9 @@ def test_tts_sanitizer_strips_markdown_and_brackets():
     assert "epaslaugos taškas l t" in out
 
     # Bracket audio tags — stripped, surrounding text preserved.
-    assert _sanitize_for_tts("[warmly] Sveiki, [thoughtfully] klausau.") == "Sveiki, klausau."
+    out = _sanitize_for_tts("[warmly] Sveiki, [thoughtfully] klausau.")
+    assert "[" not in out and "warmly" not in out and "thoughtfully" not in out
+    assert "Sveiki," in out and "klausau." in out
 
     # Markdown emphasis — markers stripped, text kept.
     assert _sanitize_for_tts("Tai **labai svarbu** ir *būtina*.") == "Tai labai svarbu ir būtina."
@@ -62,16 +64,24 @@ def test_tts_sanitizer_strips_markdown_and_brackets():
     assert _sanitize_for_tts("Sveiki, padėsiu dėl deklaravimo.") == "Sveiki, padėsiu dėl deklaravimo."
 
 
-def test_speakable_filter_drops_empty_chunks():
-    """Pure-whitespace / punctuation-only chunks must NOT reach Soniox TTS."""
-    from agent import _has_speakable_content
+def test_sanitizer_preserves_prosody_chunks():
+    """Punctuation and leading whitespace must reach Soniox TTS — they
+    drive prosody. Dropping them was the cause of the 'concatenated
+    monotone' speech bug."""
+    from agent import _sanitize_for_tts
 
-    assert _has_speakable_content("Labas")
-    assert _has_speakable_content("123")
-    assert not _has_speakable_content("")
-    assert not _has_speakable_content("   ")
-    assert not _has_speakable_content("...")
-    assert not _has_speakable_content(",.; —")
+    # Punctuation chunks pass through unchanged.
+    assert _sanitize_for_tts(",") == ","
+    assert _sanitize_for_tts(".") == "."
+    assert _sanitize_for_tts("?") == "?"
+    assert _sanitize_for_tts("!") == "!"
+
+    # Leading space preserved (separates words across chunks).
+    assert _sanitize_for_tts(" jei") == " jei"
+    assert _sanitize_for_tts(" išvykstate") == " išvykstate"
+
+    # Trailing newline preserved (sentence boundary).
+    assert _sanitize_for_tts("Lietuvos.\n") == "Lietuvos.\n"
 
 
 def test_kb_lookups_work():
