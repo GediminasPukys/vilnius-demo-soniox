@@ -21,21 +21,47 @@ def test_faq_entries_well_formed():
         assert slug and entry["question"].strip() and entry["answer"].strip()
 
 
-def test_function_tools_have_resolvable_type_hints():
+def test_info_agent_has_no_function_tools():
+    """KB is inlined into the system prompt — InfoAgent must expose ZERO
+    @function_tool methods so the LLM answers in a single turn instead
+    of round-tripping through tool calls. Tool calls were the root cause
+    of multiple Soniox TTS quirks (empty-turn audio, latency)."""
     from agent import InfoAgent
 
-    failures = []
+    tool_names = []
     for attr_name in dir(InfoAgent):
         attr = getattr(InfoAgent, attr_name, None)
-        wrapped = getattr(attr, "__wrapped__", None) if callable(attr) else None
-        if wrapped is None:
-            continue
-        try:
-            get_type_hints(wrapped, include_extras=True)
-        except Exception as e:  # noqa: BLE001
-            failures.append((attr_name, repr(e)))
+        if callable(attr) and getattr(attr, "__wrapped__", None) is not None:
+            tool_names.append(attr_name)
 
-    assert not failures, f"Tool type hints failed: {failures}"
+    assert tool_names == [], (
+        f"InfoAgent must have no @function_tool methods, got: {tool_names}"
+    )
+
+
+def test_kb_text_inlined_into_instructions():
+    """Every FAQ question and every deadline scenario must be present in
+    the system prompt verbatim — that's the whole point of inlining."""
+    from agent import INSTRUCTIONS
+    from knowledge.faqs import FAQS
+    from knowledge.kb import DEADLINES, CONTACTS, SENIUNIJOS_INFO
+
+    for slug, entry in FAQS.items():
+        assert entry["question"] in INSTRUCTIONS, f"FAQ {slug!r} question missing from prompt"
+        assert entry["answer"] in INSTRUCTIONS, f"FAQ {slug!r} answer missing from prompt"
+
+    for slug, deadline in DEADLINES.items():
+        assert deadline in INSTRUCTIONS, f"Deadline {slug!r} missing from prompt"
+
+    assert CONTACTS["savivaldybes_telefonas"] in INSTRUCTIONS
+    assert SENIUNIJOS_INFO in INSTRUCTIONS
+
+
+def test_kb_text_size_under_4k_tokens():
+    """Prompt-cache friendliness gate: keep the inlined KB under ~4k
+    tokens (~16 KB) so the cached prefix stays cheap."""
+    from agent import KB_TEXT
+    assert len(KB_TEXT) < 16000, f"KB_TEXT is {len(KB_TEXT)} chars — over the 16 KB ceiling"
 
 
 def test_tts_sanitizer_strips_markdown_and_brackets():

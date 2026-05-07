@@ -198,3 +198,62 @@ NELAIKOMI_PAKEITUSIAIS: list[str] = [
     "kalinimo vietose.",
     "Jūreiviai.",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Inline KB block — built once at import time, embedded in the system prompt.
+# ---------------------------------------------------------------------------
+
+def build_kb_text() -> str:
+    """Render the full KB (FAQ + structured data) as plain Lithuanian text.
+
+    The result is inlined into ``InfoAgent.instructions`` so the LLM can
+    answer in a single turn without round-tripping to a tool. With LiveKit
+    Inference's prompt caching, the ~2,500-token block is cached across
+    turns after the first call, so cost stays flat.
+    """
+    from knowledge.faqs import FAQS
+
+    parts: list[str] = []
+
+    parts.append("# Žinių bazė: gyvenamosios vietos deklaravimas Vilniuje\n")
+    parts.append("## Paslaugos aprašymas\n" + SERVICE_OVERVIEW + "\n")
+
+    parts.append("\n## Terminai")
+    for slug, text in DEADLINES.items():
+        parts.append(f"- **{slug}**: {text}")
+
+    parts.append("\n## Reikiami dokumentai")
+    for slug, docs in REQUIRED_DOCS.items():
+        parts.append(f"\n**{slug}**:")
+        for d in docs:
+            parts.append(f"  - {d}")
+
+    parts.append("\n## Kontaktai")
+    parts.append(f"- Bendras savivaldybės telefonas: {CONTACTS['savivaldybes_telefonas']} (trumpasis {CONTACTS['savivaldybes_trumpasis']})")
+    parts.append(f"- Elektroninis paštas: {CONTACTS['savivaldybes_elpastas']}")
+    parts.append(f"- Adresas: {CONTACTS['savivaldybes_adresas']}")
+    parts.append(f"- Konsultacijų telefonas (deklaravimo klausimais): {CONTACTS['konsultacijos_telefonas']}")
+    parts.append(f"- Konsultacijų darbo laikas: {CONTACTS['konsultacijos_darbo_laikas']}")
+    parts.append(f"- Elektroninių paslaugų portalas: {CONTACTS['epaslaugos_url']}")
+    parts.append(f"- Seniūnijų sąrašas: {CONTACTS['seniunijos_url']}")
+    parts.append(f"- Paslaugos suteikimo trukmė: {CONTACTS['paslauga_trukme']}")
+
+    parts.append("\n## Seniūnijos\n" + SENIUNIJOS_INFO)
+    parts.append("Vilniaus miesto seniūnijos: " + ", ".join(SENIUNIJOS_VILNIUJE) + ".")
+
+    parts.append("\n## Konsultacijų kanalai\n" + KONSULTACIJOS)
+
+    parts.append("\n## Nelaikomi pakeitusiais gyvenamąją vietą")
+    for x in NELAIKOMI_PAKEITUSIAIS:
+        parts.append(f"- {x}")
+
+    parts.append("\n## Dažniausiai užduodami klausimai (DUK)")
+    for slug, entry in FAQS.items():
+        parts.append(f"\n### {entry['question']}")
+        parts.append(entry["answer"])
+
+    return "\n".join(parts)
+
+
+KB_TEXT: str = build_kb_text()

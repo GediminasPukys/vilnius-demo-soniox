@@ -61,9 +61,11 @@ async def test_agent_cites_one_month_when_arriving(llm, agent_session):
     await msg.judge(
         llm,
         intent=(
-            "Atsakymas turi pasakyti, kad reikia deklaruoti gyvenamąją "
-            "vietą per VIENĄ MĖNESĮ nuo pareigos atsiradimo. Atsakymas "
-            "lietuvių kalba, žodžiais, be santrumpų."
+            "Atsakymas turi paminėti VIENĄ MĖNESĮ kaip terminą gyvenamosios "
+            "vietos deklaravimui. Pradžios momentas gali būti formuluojamas "
+            "kaip nuo persikraustymo, nuo apsigyvenimo arba nuo pareigos "
+            "atsiradimo — visi yra teisingi. Atsakymas lietuvių kalba, "
+            "žodžiais, be santrumpų."
         ),
     )
 

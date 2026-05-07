@@ -1,14 +1,16 @@
 """Vilnius savivaldybės balso agentas — Soniox STT + Soniox TTS variantas.
 
-Vienas failas: AgentSession setup, sistemos prompt'as, balso įrankiai
-(KB lookup'ai), entrypoint.
+Vienas failas: AgentSession setup, sistemos prompt'as, entrypoint.
+
+KB FILOSOFIJA: visa žinių bazė (FAQ + dokumentai + terminai + kontaktai)
+INLINE'ina į sistemos prompt'ą — JOKIŲ funkcijų įrankių. Su LiveKit
+Inference prompt-caching'u 2 500-token'ų KB blokas po pirmo skambučio
+yra cache'uojamas, todėl kaina lieka stabili, o latency'is sumažėja
+nuo dviejų LLM round-trip'ų į vieną.
 
 - STT: Soniox ``stt-rt-v4`` (lt strict).
 - LLM: ``openai/gpt-5.3-chat-latest`` per LiveKit Inference.
-- TTS: Soniox ``tts-rt-v1`` per lokalų ``soniox_tts/`` paketą
-  (žr. soniox_livekit_agent projektą — tas pats plugin'as,
-  tik pavadintas ``soniox_tts``, kad nesusidurtų su
-  ``livekit.plugins.soniox`` STT plugin'u).
+- TTS: Soniox ``tts-rt-v1`` per lokalų ``soniox_tts/`` paketą.
 - Turn detection: Soniox STT endpointing (``turn_detection="stt"``).
   JOKIO turn-detector modelio.
 """
@@ -31,23 +33,12 @@ from livekit.agents import (
     cli,
     inference,
 )
-from livekit.agents.llm import function_tool
 from livekit.agents.voice import ModelSettings, RunContext, room_io
 from livekit.plugins import noise_cancellation, silero, soniox
 
 import soniox_tts
 
-from knowledge.faqs import FAQS, faq_index, get_faq
-from knowledge.kb import (
-    CONTACTS,
-    DEADLINES,
-    KONSULTACIJOS,
-    NELAIKOMI_PAKEITUSIAIS,
-    REQUIRED_DOCS,
-    SENIUNIJOS_INFO,
-    SENIUNIJOS_VILNIUJE,
-    SERVICE_OVERVIEW,
-)
+from knowledge.kb import KB_TEXT, SENIUNIJOS_VILNIUJE
 
 
 load_dotenv(dotenv_path=".env")
@@ -61,7 +52,6 @@ logger = logging.getLogger("vilnius-agent")
 
 @dataclass
 class CallState:
-    last_topic: Optional[str] = None
     questions_answered: int = 0
 
 
@@ -103,16 +93,11 @@ INSTRUCTIONS = f"""Tu esi Rūta — Vilniaus miesto savivaldybės virtuali balso
 # Pokalbio scenarijus
 
 1. Klientas užduoda klausimą.
-2. Identifikuoji temą ir kvieti VIENĄ įrankį, kad gautum kanoninį tekstą:
-   - ``lookup_faq(faq_id)`` — DUK atsakymas pagal slug'ą iš sąrašo žemiau.
-   - ``get_required_documents(scenario)`` — dokumentų sąrašas.
-   - ``get_deadline(scenario)`` — terminas.
-   - ``get_contact_info()`` — telefonai, adresai, darbo laikas.
-   - ``get_seniunijos_info()`` — kur deklaruoti pagal teritoriją (Šnipiškių išimtis).
-   - ``get_service_overview()`` — bendras paslaugos aprašymas.
-   - ``get_exempt_categories()`` — kas nelaikomas pakeitusiu gyvenamąją vietą.
-3. Pristatyk atsakymą SAVO ŽODŽIAIS, trumpai, šiltai.
-4. Klausi „ar dar galiu kuo nors padėti?".
+2. Atpažįsti temą ir IŠ KARTO atsakai SAVO ŽODŽIAIS pagal žemiau pateiktą
+   žinių bazę. JOKIŲ įrankių kviesti NEREIKIA — visa informacija jau
+   įkelta į kontekstą.
+3. Atsakymas trumpas (1–3 sakiniai), šiltas, dalykiškas.
+4. Pabaigoje paklausi „ar dar galiu kuo nors padėti?".
 
 # Apribojimai
 
@@ -139,15 +124,18 @@ Tavo tekstą skaitys Soniox TTS lietuvių kalba.
 
 # Bendros taisyklės
 
-- NIEKADA neišgalvok dokumentų, terminų ar kontaktų — visada gauk juos iš įrankio.
+- Atsakyk TIK iš žemiau pateiktos žinių bazės. NIEKADA neišgalvok
+  dokumentų, terminų, telefonų ar adresų — jei žinių bazėje atsakymo
+  nėra, sąžiningai pasakyk, kad tikslesnės informacijos klausti
+  konsultacijų telefonu.
 - Šnipiškių gyventojai deklaruoja Klientų aptarnavimo skyriuje, NE seniūnijoje.
 - Deklaravimo paslauga yra NEMOKAMA.
 - Jei klientas aiškiai prašo žmogaus — pasiūlyk paskambinti bendruoju
   savivaldybės numeriu penki, du vienas vienas, du tūkstančiai.
 
-# DUK indeksas (``lookup_faq`` slug'ai)
+---
 
-{faq_index()}
+{KB_TEXT}
 """
 
 
@@ -299,95 +287,6 @@ class InfoAgent(Agent):
         """
         return Agent.default.tts_node(self, _sanitize_stream(text), model_settings)
 
-    @function_tool
-    async def lookup_faq(self, context: RunCtx, faq_id: str) -> str:
-        """Grąžina kanoninį atsakymą iš Vilniaus savivaldybės DUK pagal slug'ą."""
-        faq = get_faq(faq_id)
-        if faq is None:
-            available = ", ".join(FAQS.keys())
-            return f"Slug'as {faq_id!r} nerastas. Galimi: {available}."
-        context.userdata.last_topic = faq_id
-        context.userdata.questions_answered += 1
-        return (
-            f"DUK tema: {faq['question']}\n"
-            f"Kanoninis atsakymas: {faq['answer']}\n\n"
-            "INSTRUKCIJA TAU: pristatyk savo žodžiais, trumpai, šiltai."
-        )
-
-    @function_tool
-    async def get_required_documents(self, context: RunCtx, scenario: str) -> str:
-        """Reikiamų dokumentų sąrašas pagal scenarijų.
-
-        Galimi: ``persikraustymas_lt``, ``atvykimas_i_lt``, ``isvykimas_iz_lt``,
-        ``vaiko_deklaravimas``, ``globejas``, ``studentas_bendrabutyje``.
-        """
-        docs = REQUIRED_DOCS.get(scenario)
-        if docs is None:
-            return f"Scenarijus {scenario!r} nepalaikomas. Galimi: {', '.join(REQUIRED_DOCS)}."
-        context.userdata.last_topic = f"docs:{scenario}"
-        context.userdata.questions_answered += 1
-        numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(docs, 1))
-        return f"Reikiami dokumentai:\n{numbered}"
-
-    @function_tool
-    async def get_deadline(self, context: RunCtx, scenario: str) -> str:
-        """Deklaravimo terminas pagal scenarijų.
-
-        Galimi: ``persikraustymas_lt``, ``atvykimas_i_lt``, ``isvykimas_iz_lt``,
-        ``be_pakeitimo``.
-        """
-        deadline = DEADLINES.get(scenario)
-        if deadline is None:
-            return f"Scenarijus {scenario!r} nežinomas. Galimi: {', '.join(DEADLINES)}."
-        context.userdata.last_topic = f"deadline:{scenario}"
-        context.userdata.questions_answered += 1
-        return deadline
-
-    @function_tool
-    async def get_contact_info(self, context: RunCtx) -> str:
-        """Vilniaus savivaldybės kontaktai deklaravimo klausimais."""
-        context.userdata.last_topic = "contact_info"
-        context.userdata.questions_answered += 1
-        return (
-            f"Bendras savivaldybės telefonas: {CONTACTS['savivaldybes_telefonas']} "
-            f"(trumpasis {CONTACTS['savivaldybes_trumpasis']}). "
-            f"Elektroninis paštas: {CONTACTS['savivaldybes_elpastas']}. "
-            f"Adresas: {CONTACTS['savivaldybes_adresas']}. "
-            f"Konsultacijos telefonu: {CONTACTS['konsultacijos_telefonas']}, "
-            f"{CONTACTS['konsultacijos_darbo_laikas']}. "
-            f"Elektroninės paslaugos: {CONTACTS['epaslaugos_url']}. "
-            f"Seniūnijos: {CONTACTS['seniunijos_url']}.\n\n"
-            "INSTRUKCIJA TAU: pristatyk klientui TIK tuos kontaktus, "
-            "kurių jis prašo. Numerius sakyk lietuviškais žodžiais grupėmis."
-        )
-
-    @function_tool
-    async def get_seniunijos_info(self, context: RunCtx) -> str:
-        """Kur deklaruoti pagal Vilniaus teritorijos dalį (Šnipiškių išimtis)."""
-        context.userdata.last_topic = "seniunijos"
-        context.userdata.questions_answered += 1
-        return SENIUNIJOS_INFO
-
-    @function_tool
-    async def get_service_overview(self, context: RunCtx) -> str:
-        """Bendras gyvenamosios vietos deklaravimo paslaugos aprašymas."""
-        context.userdata.last_topic = "overview"
-        context.userdata.questions_answered += 1
-        return f"{SERVICE_OVERVIEW}\n\n{KONSULTACIJOS}"
-
-    @function_tool
-    async def get_exempt_categories(self, context: RunCtx) -> str:
-        """Asmenys, NELAIKOMI pakeitusiais deklaruotą gyvenamąją vietą.
-
-        Pavyzdžiui: studentai mokymosi laikotarpiu, jūreiviai, asmenys
-        atliekantys karinę tarnybą, gydomi stacionariose įstaigose.
-        """
-        context.userdata.last_topic = "exempt"
-        context.userdata.questions_answered += 1
-        numbered = "\n".join(f"{i}. {d}" for i, d in enumerate(NELAIKOMI_PAKEITUSIAIS, 1))
-        return f"Šie asmenys nelaikomi pakeitusiais gyvenamąją vietą:\n{numbered}"
-
-
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -427,14 +326,16 @@ async def entrypoint(ctx: JobContext) -> None:
             # full turn before TTS removes the fragments entirely.
             preemptive_generation={"enabled": False},
         ),
-        max_tool_steps=3,
+        # No tools — the entire KB is inlined into the system prompt.
+        max_tool_steps=0,
         user_away_timeout=30,
     )
 
     logger.info(
         "[BOOT] Soniox variant — text_input=True, audio_input=BVC, "
-        "TTS=soniox tts-rt-v1 voice=Maya language=lt (WebSocket: "
-        "wss://tts-rt.soniox.com/tts-websocket)"
+        "TTS=soniox tts-rt-v1 voice=Maya language=lt "
+        "(WebSocket: wss://tts-rt.soniox.com/tts-websocket); "
+        f"KB inlined ({len(KB_TEXT)} chars), no tools"
     )
     await session.start(
         agent=InfoAgent(),
