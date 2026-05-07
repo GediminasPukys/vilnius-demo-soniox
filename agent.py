@@ -27,6 +27,9 @@ from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
     AgentSession,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
     JobContext,
     TurnHandlingOptions,
     WorkerOptions,
@@ -392,6 +395,18 @@ class InfoAgent(Agent):
 # ---------------------------------------------------------------------------
 
 async def entrypoint(ctx: JobContext) -> None:
+    """Entrypoint — production-grade per livekit-agents skill checklist.
+
+    Wiring:
+    - try/except wraps session.start() so Soniox WS failures, Inference
+      5xx, or Silero load errors don't crash the worker silently.
+    - ctx.add_shutdown_callback() emits a structured session report
+      (session.usage + history length) — searchable alongside other
+      production logs. Per docs:
+      https://docs.livekit.io/deploy/observability/data/#session-reports
+    - BackgroundAudioPlayer adds OFFICE_AMBIENCE + KEYBOARD_TYPING
+      fillers — addresses skill principle "Silence feels broken".
+    """
     logger.info(f"Starting Vilnius (Soniox TTS) agent in room {ctx.room.name}")
     await ctx.connect()
 
@@ -417,7 +432,14 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
         turn_handling=TurnHandlingOptions(
             turn_detection="stt",
-            interruption={"resume_false_interruption": True},
+            interruption={
+                "resume_false_interruption": True,
+                # Lithuanian acknowledgements ("aha", "taip") are
+                # one-word — they should NOT interrupt the agent.
+                # Per Phonic plugin guide: min_words=2 filters those.
+                "min_words": 2,
+                "min_duration": 0.4,
+            },
             # Preemptive generation DISABLED on the Soniox variant.
             # Reason: Soniox TTS plays the LLM's filler tokens (whitespace,
             # tiny pre-tool-call fragments) as garbled audio because each
@@ -431,28 +453,107 @@ async def entrypoint(ctx: JobContext) -> None:
         user_away_timeout=30,
     )
 
+    # ----- Per-turn metrics + cache visibility (skill: measure latency) -----
+    @session.on("conversation_item_added")
+    def _log_turn_metrics(ev) -> None:
+        from livekit.agents.llm import ChatMessage
+        if not isinstance(ev.item, ChatMessage):
+            return
+        m = ev.item.metrics or {}
+        if ev.item.role == "assistant":
+            ttft = m.get("llm_node_ttft")
+            ttfb = m.get("tts_node_ttfb")
+            e2e = m.get("e2e_latency")
+            cached = m.get("prompt_cached_tokens")
+            if any(v is not None for v in (ttft, ttfb, e2e, cached)):
+                logger.info(
+                    f"[TURN] llm_ttft={ttft} tts_ttfb={ttfb} e2e={e2e} "
+                    f"cached_tokens={cached}"
+                )
+
+    # ----- Shutdown report (skill: observability data hooks) ---------------
+    async def _on_shutdown() -> None:
+        try:
+            usage_lines = []
+            if hasattr(session, "usage") and session.usage:
+                for u in session.usage.model_usage:
+                    usage_lines.append(f"{u.provider}/{u.model}: {u}")
+            history_len = (
+                len(session.history.items) if session.history else 0
+            )
+            logger.info(
+                "[SESSION_END] room=%s history_items=%d usage=%s",
+                ctx.room.name,
+                history_len,
+                " | ".join(usage_lines) or "<none>",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[SESSION_END] failed to log report: {e!r}")
+
+    ctx.add_shutdown_callback(_on_shutdown)
+
     logger.info(
         "[BOOT] Soniox variant — text_input=True, audio_input=BVC, "
         "TTS=soniox tts-rt-v1 voice=Maya language=lt "
         "(WebSocket: wss://tts-rt.soniox.com/tts-websocket); "
-        f"KB inlined ({len(KB_TEXT)} chars), no tools"
+        f"KB inlined ({len(KB_TEXT)} chars), tools=[end_call]; "
+        "BackgroundAudio=OFFICE_AMBIENCE+KEYBOARD_TYPING"
     )
-    await session.start(
-        agent=InfoAgent(),
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=noise_cancellation.BVC(),
+
+    # ----- Graceful start (skill: design for the unhappy path) -------------
+    try:
+        await session.start(
+            agent=InfoAgent(),
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(
+                    noise_cancellation=noise_cancellation.BVC(),
+                ),
+                # Required so the LiveKit Agents Console can deliver typed
+                # AND transcribed-voice messages on the ``lk.agent.request``
+                # text stream. Without this, every user turn is dropped with
+                # the log line "ignoring text stream with topic
+                # 'lk.agent.request', no callback attached".
+                text_input=True,
+                delete_room_on_close=False,
             ),
-            # Required so the LiveKit Agents Console can deliver typed
-            # AND transcribed-voice messages on the ``lk.agent.request``
-            # text stream. Without this, every user turn is dropped with
-            # the log line "ignoring text stream with topic
-            # 'lk.agent.request', no callback attached".
-            text_input=True,
-            delete_room_on_close=False,
-        ),
-    )
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"[BOOT] session.start failed: {e!r}")
+        try:
+            session.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+    # ----- BackgroundAudio (skill: silence feels broken) -------------------
+    # Started AFTER session.start so it attaches to a live agent session.
+    # OFFICE_AMBIENCE on a low loop fills "what's happening?" silence;
+    # KEYBOARD_TYPING fires automatically while the agent is in the
+    # `thinking` state (between user EOU and agent first audio chunk).
+    background_audio: BackgroundAudioPlayer | None = None
+    try:
+        background_audio = BackgroundAudioPlayer(
+            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.25),
+            thinking_sound=[
+                AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.6),
+                AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING2, volume=0.5),
+            ],
+        )
+        await background_audio.start(room=ctx.room, agent_session=session)
+
+        async def _close_background_audio() -> None:
+            if background_audio is not None:
+                try:
+                    await background_audio.aclose()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"BackgroundAudio aclose failed: {e!r}")
+
+        ctx.add_shutdown_callback(_close_background_audio)
+    except Exception as e:  # noqa: BLE001
+        # BackgroundAudio is optional — a failure here MUST NOT kill the call.
+        logger.warning(f"[BOOT] BackgroundAudio init skipped: {e!r}")
+
     logger.info("[BOOT] session.start returned — agent ready")
 
 
