@@ -40,18 +40,21 @@ def test_info_agent_has_no_kb_function_tools():
     )
 
 
-def test_agent_uses_grace_voice():
-    """Soniox TTS voice MUST be 'Grace' (per user spec). Not 'Maya',
-    'Adrian', or any default. Verified via the agent module source."""
+def test_agent_uses_claire_voice():
+    """Soniox TTS voice MUST be 'Claire' (user reported Grace sounds
+    rough; switched to Claire for a softer customer-service tone).
+    Soniox API has no tone/pitch knobs — voice swap is the only lever."""
     import inspect
     import agent
     src = inspect.getsource(agent.entrypoint)
-    assert 'voice="Grace"' in src or "voice='Grace'" in src, (
-        "Soniox TTS voice must be set to 'Grace' explicitly in entrypoint."
+    assert 'voice="Claire"' in src or "voice='Claire'" in src, (
+        "Soniox TTS voice must be set to 'Claire' explicitly in entrypoint."
     )
-    assert 'voice="Maya"' not in src and "voice='Maya'" not in src, (
-        "Voice must be Grace, not Maya."
-    )
+    # Make sure none of the previously-used voices are still wired.
+    for old in ("Grace", "Maya", "Adrian"):
+        assert f'voice="{old}"' not in src and f"voice='{old}'" not in src, (
+            f"Voice must be Claire, not {old}."
+        )
 
 
 def test_info_agent_has_end_call_tool():
