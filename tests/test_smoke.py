@@ -40,6 +40,20 @@ def test_info_agent_has_no_kb_function_tools():
     )
 
 
+def test_agent_uses_grace_voice():
+    """Soniox TTS voice MUST be 'Grace' (per user spec). Not 'Maya',
+    'Adrian', or any default. Verified via the agent module source."""
+    import inspect
+    import agent
+    src = inspect.getsource(agent.entrypoint)
+    assert 'voice="Grace"' in src or "voice='Grace'" in src, (
+        "Soniox TTS voice must be set to 'Grace' explicitly in entrypoint."
+    )
+    assert 'voice="Maya"' not in src and "voice='Maya'" not in src, (
+        "Voice must be Grace, not Maya."
+    )
+
+
 def test_info_agent_has_end_call_tool():
     """The agent must expose `end_call` so it can hang up cleanly when
     the user signals goodbye. Without this the agent loops 'kreipkitės'
