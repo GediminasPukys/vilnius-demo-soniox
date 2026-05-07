@@ -21,11 +21,11 @@ def test_faq_entries_well_formed():
         assert slug and entry["question"].strip() and entry["answer"].strip()
 
 
-def test_info_agent_has_no_function_tools():
+def test_info_agent_has_no_kb_function_tools():
     """KB is inlined into the system prompt — InfoAgent must expose ZERO
-    @function_tool methods so the LLM answers in a single turn instead
-    of round-tripping through tool calls. Tool calls were the root cause
-    of multiple Soniox TTS quirks (empty-turn audio, latency)."""
+    KB-fetching @function_tool methods on the class. The only tool the
+    agent uses is `end_call` (mounted via the EndCallTool helper at
+    construction time, NOT a @function_tool method on the class)."""
     from agent import InfoAgent
 
     tool_names = []
@@ -35,7 +35,21 @@ def test_info_agent_has_no_function_tools():
             tool_names.append(attr_name)
 
     assert tool_names == [], (
-        f"InfoAgent must have no @function_tool methods, got: {tool_names}"
+        f"InfoAgent must have no @function_tool methods on the class "
+        f"(end_call is mounted via tools= constructor arg). Got: {tool_names}"
+    )
+
+
+def test_info_agent_has_end_call_tool():
+    """The agent must expose `end_call` so it can hang up cleanly when
+    the user signals goodbye. Without this the agent loops 'kreipkitės'
+    farewells indefinitely (see RM_AYNAmprLgMzu)."""
+    from agent import InfoAgent
+
+    agent_instance = InfoAgent()
+    tool_names = [t.info.name for t in (agent_instance.tools or [])]
+    assert "end_call" in tool_names, (
+        f"InfoAgent.tools must include 'end_call'. Got: {tool_names}"
     )
 
 
