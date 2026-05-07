@@ -41,6 +41,7 @@ from livekit.agents.voice import ModelSettings, RunContext, room_io
 from livekit.plugins import noise_cancellation, silero, soniox
 
 import soniox_tts
+from voice_agent_observability import init_observability, obs
 
 from knowledge.kb import KB_TEXT, SENIUNIJOS_VILNIUJE
 
@@ -48,6 +49,20 @@ from knowledge.kb import KB_TEXT, SENIUNIJOS_VILNIUJE
 load_dotenv(dotenv_path=".env")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("vilnius-agent")
+
+
+# ---------------------------------------------------------------------------
+# voice-agent-observability — capture every session into the obs dashboard.
+# ---------------------------------------------------------------------------
+# Module-level init so the log-forwarding handler attaches as early as
+# possible. Empty env vars cleanly disable the SDK (no-op mode), so this
+# is also safe in local dev / CI without a backend.
+init_observability(
+    ingest_url=os.getenv("OBS_INGEST_URL"),
+    api_key=os.getenv("OBS_API_KEY"),
+    agent_slug="vilnius-soniox",
+    livekit_project=os.getenv("LIVEKIT_PROJECT_ID"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +586,13 @@ async def entrypoint(ctx: JobContext) -> None:
         f"KB inlined ({len(KB_TEXT)} chars), tools=[end_call]; "
         "BackgroundAudio=OFFICE_AMBIENCE+KEYBOARD_TYPING"
     )
+
+    # ----- voice-agent-observability ---------------------------------------
+    # MUST be called BEFORE session.start() — the SDK registers event
+    # listeners (conversation_item_added, function_tools_executed,
+    # metrics_collected, agent_state_changed) on the session that need
+    # to fire from turn 1. Calling after start() is too late.
+    obs.attach(ctx, session)
 
     # ----- Graceful start (skill: design for the unhappy path) -------------
     try:

@@ -10,7 +10,11 @@ dependencies = [
     "livekit-plugins-noise-cancellation>=0.2",
     "aiohttp>=3.9",
     "python-dotenv>=1.0",
+    "voice-agent-observability",
 ]
+
+[tool.uv.sources]
+voice-agent-observability = { git = "https://github.com/GediminasPukys/voice-agent-observability.git", subdirectory = "sdk", branch = "main" }
 
 [project.optional-dependencies]
 dev = [

@@ -1797,6 +1797,7 @@ dependencies = [
     { name = "livekit-plugins-silero" },
     { name = "livekit-plugins-soniox" },
     { name = "python-dotenv" },
+    { name = "voice-agent-observability" },
 ]
 
 [package.optional-dependencies]
@@ -1815,8 +1816,20 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "voice-agent-observability", git = "https://github.com/GediminasPukys/voice-agent-observability.git?subdirectory=sdk&branch=main" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "voice-agent-observability"
+version = "0.1.0"
+source = { git = "https://github.com/GediminasPukys/voice-agent-observability.git?subdirectory=sdk&branch=main#0dbccd3c9a0b0fd507102589183a513441c1e7bb" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
 
 [[package]]
 name = "watchfiles"
