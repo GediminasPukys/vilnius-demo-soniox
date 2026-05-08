@@ -16,6 +16,7 @@ nuo dviejų LLM round-trip'ų į vieną.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -41,7 +42,12 @@ from livekit.agents.voice import ModelSettings, RunContext, room_io
 from livekit.plugins import noise_cancellation, silero, soniox
 
 import soniox_tts
-from voice_agent_observability import init_observability, obs
+from voice_agent_observability import (
+    init_observability,
+    obs,
+    predict_audio_url,
+    start_audio_archive,
+)
 
 from knowledge.kb import KB_TEXT, SENIUNIJOS_VILNIUJE
 
@@ -593,6 +599,47 @@ async def entrypoint(ctx: JobContext) -> None:
     # metrics_collected, agent_state_changed) on the session that need
     # to fire from turn 1. Calling after start() is too late.
     obs.attach(ctx, session)
+
+    # ----- obs audio archive — RoomCompositeEgress → GCS bucket ------------
+    # Without this, the obs UI shows only "Audio retained on LiveKit Cloud
+    # (30 days)" with a deep-link to LiveKit. WITH it, the obs UI renders
+    # an inline <audio> player that plays the call directly from our GCS
+    # bucket and persists indefinitely. Pattern lifted from musu-namai.
+    audio_bucket = os.getenv("OBS_AUDIO_BUCKET")
+    obs_session_id = getattr(session.userdata, "obs_session_id", None)
+    if audio_bucket and obs_session_id:
+        livekit_url = os.getenv("LIVEKIT_URL", "")
+        livekit_api_key = os.getenv("LIVEKIT_API_KEY", "")
+        livekit_api_secret = os.getenv("LIVEKIT_API_SECRET", "")
+        gcp_creds = os.getenv("GOOGLE_CREDENTIALS", "")
+        if livekit_url and livekit_api_key and livekit_api_secret and gcp_creds:
+            asyncio.create_task(
+                start_audio_archive(
+                    livekit_url=livekit_url,
+                    livekit_api_key=livekit_api_key,
+                    livekit_api_secret=livekit_api_secret,
+                    room_name=ctx.room.name,
+                    obs_session_id=obs_session_id,
+                    bucket=audio_bucket,
+                    gcp_credentials_json=gcp_creds,
+                )
+            )
+            # Predict the URL and stamp it on the session right away so
+            # the obs UI renders the player even before egress finishes
+            # (player will 404 until the egress completes).
+            predicted = predict_audio_url(audio_bucket, obs_session_id)
+            try:
+                obs._client.patch_session(
+                    session_id=obs_session_id, audio_url=predicted,
+                )
+                logger.info(f"[obs] audio archive scheduled → {predicted}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[obs] patch_session(audio_url) failed: {e!r}")
+        else:
+            logger.warning(
+                "[obs] audio archive disabled — missing LIVEKIT_URL / "
+                "LIVEKIT_API_KEY / LIVEKIT_API_SECRET / GOOGLE_CREDENTIALS"
+            )
 
     # ----- Graceful start (skill: design for the unhappy path) -------------
     try:

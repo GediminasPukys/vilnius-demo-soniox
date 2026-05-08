@@ -95,3 +95,63 @@ def test_obs_attach_signature():
         "obs.attach must be called as obs.attach(ctx, session). "
         "Other orderings or missing args are silent failures."
     )
+
+
+def test_audio_archive_imports_present():
+    """start_audio_archive + predict_audio_url must be imported so the
+    obs UI can render an inline audio player instead of falling back
+    to LiveKit Cloud's 30-day retention link."""
+    import agent
+    assert hasattr(agent, "start_audio_archive"), (
+        "agent.py must import start_audio_archive from voice_agent_observability"
+    )
+    assert hasattr(agent, "predict_audio_url"), (
+        "agent.py must import predict_audio_url from voice_agent_observability"
+    )
+
+
+def test_audio_archive_wired_in_entrypoint():
+    """The audio-archive helper must be CALLED inside entrypoint —
+    just importing isn't enough. Schedule it as an asyncio.create_task
+    AFTER obs.attach (so obs_session_id is populated) and BEFORE
+    session.start (so egress runs for the full call).
+    Look for the canonical idiom from musu-namai: start_audio_archive
+    spawned via asyncio.create_task with bucket + obs_session_id."""
+    import agent
+    src = inspect.getsource(agent.entrypoint)
+
+    assert "start_audio_archive(" in src, (
+        "entrypoint() must call start_audio_archive(...) — without it, "
+        "the obs UI falls back to the LiveKit Cloud 30-day retention "
+        "deep-link (see musu-namai vs vilnius-soniox session comparison)."
+    )
+    assert "predict_audio_url(" in src, (
+        "entrypoint() must call predict_audio_url(...) and patch the "
+        "session.audio_url so the obs UI renders the inline <audio> "
+        "player even before the egress finishes."
+    )
+
+    # Order: attach → audio-archive → session.start
+    attach_idx = src.find("obs.attach(")
+    archive_idx = src.find("start_audio_archive(")
+    start_idx = src.find("await session.start(")
+    assert attach_idx < archive_idx < start_idx, (
+        f"Order must be: obs.attach → start_audio_archive → "
+        f"await session.start. Got {attach_idx} / {archive_idx} / {start_idx}."
+    )
+
+
+def test_audio_archive_guards_on_missing_creds():
+    """The audio-archive block must guard against missing
+    LIVEKIT_URL/API_KEY/SECRET or GOOGLE_CREDENTIALS — those are
+    required for the egress, and a missing one shouldn't crash the
+    agent. The guard must log a warning so the silence is visible."""
+    import agent
+    src = inspect.getsource(agent.entrypoint)
+    # Look for the cred-presence guard on all four required vars.
+    for var in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "GOOGLE_CREDENTIALS"):
+        assert var in src, f"audio-archive guard must check for {var}"
+    assert "warning" in src.lower() and "audio archive" in src.lower(), (
+        "Missing-creds path must emit a logger.warning so the silent "
+        "fallback is visible in production logs."
+    )
